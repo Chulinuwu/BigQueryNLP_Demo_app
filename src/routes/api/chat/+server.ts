@@ -8,7 +8,8 @@ const client = new BigQuery({
     keyFilename: env.GOOGLE_APPLICATION_CREDENTIALS || undefined
 });
 
-// System prompt that defines the AI's behavior
+// Original hardcoded system prompt (kept for reference)
+/*
 const SYSTEM_PROMPT = `You are an AI agent connected to a BigQuery ML.GENERATE_TEXT model.
 Your role is to serve as a chatbot interface for users.
 
@@ -40,27 +41,104 @@ Example user interactions:
   → You output: SELECT event_name, COUNT(*) as total_events FROM \`computellm-468509\`.\`analytics_438107951\`.\`events_*\` GROUP BY event_name ORDER BY total_events DESC;
 - User: "Hi, can you help me understand what this app does?"
   → You reply in natural language.`;
+*/
+
+// Dynamic system prompt generation
+async function generateSystemPrompt(): Promise<string> {
+    const projectId = env.GOOGLE_CLOUD_PROJECT_ID || 'computellm-468509';
+    const defaultDataset = 'analytics_438107951';
+
+    // Get available tables dynamically
+    let availableTables: string[] = [];
+    try {
+        // List all datasets in the project
+        const [datasets] = await client.getDatasets();
+
+        for (const dataset of datasets) {
+            try {
+                // Get tables in each dataset
+                const [tables] = await dataset.getTables();
+                for (const table of tables) {
+                    availableTables.push(`\`${projectId}\`.\`${dataset.id}\`.\`${table.id}\``);
+                }
+            } catch (error) {
+                // Skip datasets we can't access
+                console.warn(`Cannot access dataset ${dataset.id}:`, error);
+            }
+        }
+    } catch (error) {
+        console.warn('Cannot list datasets:', error);
+        // Fallback to default table reference
+        availableTables = [`\`${projectId}\`.\`${defaultDataset}\`.\`events_*\``];
+    }
+
+    // Create table examples section
+    const tableExamples = availableTables.slice(0, 5).map(table => {
+        const tableName = table.split('.').pop()?.replace(/[`]/g, '') || 'table';
+        return `- For ${tableName} data: SELECT * FROM ${table} LIMIT 10;`;
+    }).join('\n');
+
+    return `You are an AI agent connected to a BigQuery ML.GENERATE_TEXT model.
+Your role is to serve as a chatbot interface for users.
+
+Behavior rules:
+1. When the user asks a general question, respond conversationally in natural language.
+2. When the user asks to "see data" or requests information from tables in BigQuery, respond ONLY with a valid BigQuery SQL query string.
+   - Do not include explanations, comments, or natural language.
+   - The SQL must be executable directly in BigQuery.
+   - Keep SQL queries simple and clean.
+   - Only add date filters when specifically requested by the user.
+   - Use clear, readable formatting.
+
+Available Tables in BigQuery:
+${availableTables.map(table => `- ${table}`).join('\n')}
+
+Default dataset: \`${projectId}\`.\`${defaultDataset}\`.\`events_*\`
+
+SQL Query Guidelines:
+- Always use full table references with project, dataset, and table names
+- Use appropriate table based on user's request
+- If user doesn't specify a table, use the default analytics dataset
+- Optimize queries with proper filters and aggregations
+
+Example SQL Queries:
+${tableExamples}
+- For event analysis: SELECT event_name, COUNT(*) as total_events FROM \`${projectId}\`.\`${defaultDataset}\`.\`events_*\` GROUP BY event_name ORDER BY total_events DESC;
+- For page views: SELECT COUNT(*) as page_views FROM \`${projectId}\`.\`${defaultDataset}\`.\`events_*\` WHERE event_name = 'page_view';
+
+Integration flow (handled outside you, but important for consistency):
+- If you return SQL, it will be extracted and executed via the BigQuery API.
+- The resulting table will be transformed into a graph and displayed to the user.
+
+Example user interactions:
+- User: "How many page views in the last 7 days?"
+  → You output only a SQL query with date filter.
+- User: "Show me data from my uploaded table"
+  → You output SQL query referencing the appropriate uploaded table.
+- User: "Hi, can you help me understand what this app does?"
+  → You reply in natural language.`;
+}
 
 function isSQL(text: string): boolean {
     let cleanText = text.trim();
-    
+
     // If it starts with ```sql, it's definitely SQL
     if (cleanText.startsWith('```sql')) {
         return true;
     }
-    
+
     // Remove markdown code block markers if present
     if (cleanText.startsWith('```')) {
         cleanText = cleanText.replace(/```\n?/, '').replace(/```$/, '').trim();
     }
-    
+
     const upperText = cleanText.toUpperCase();
-    
+
     // Check if it starts with SELECT and contains SQL keywords
     const startsWithSelect = upperText.startsWith('SELECT');
     const containsFrom = upperText.includes(' FROM ');
     const containsKeywords = /\b(SELECT|FROM|WHERE|GROUP BY|ORDER BY|LIMIT|COUNT|SUM|AVG|JOIN|INNER|LEFT|RIGHT)\b/.test(upperText);
-    
+
     return startsWithSelect && containsFrom && containsKeywords;
 }
 
@@ -72,7 +150,7 @@ async function executeSQL(sqlQuery: string): Promise<Record<string, unknown>[]> 
         });
 
         const [rows] = await job.getQueryResults();
-        
+
         // Convert BigQuery rows to plain objects
         const results = rows.map(row => {
             const obj: Record<string, unknown> = {};
@@ -92,9 +170,10 @@ async function executeSQL(sqlQuery: string): Promise<Record<string, unknown>[]> 
 
 async function callBigQueryML(prompt: string): Promise<string> {
     try {
-        // Use parameterized query to avoid SQL injection and escaping issues
-        const fullPrompt = `${SYSTEM_PROMPT}\n\nUser: ${prompt}`;
-        
+        // Generate dynamic system prompt with current available tables
+        const systemPrompt = await generateSystemPrompt();
+        const fullPrompt = `${systemPrompt}\n\nUser: ${prompt}`;
+
         const query = `
             SELECT *
             FROM ML.GENERATE_TEXT(
@@ -114,20 +193,20 @@ async function callBigQueryML(prompt: string): Promise<string> {
         });
 
         const [rows] = await job.getQueryResults();
-        
+
         if (rows.length > 0) {
             const result = (rows[0] as Record<string, unknown>).ml_generate_text_result;
-            
+
             // Parse the JSON response from BigQuery ML
             if (typeof result === 'string') {
                 try {
                     const parsed = JSON.parse(result);
-                    
+
                     // Extract the text content from the candidates
-                    if (parsed.candidates && parsed.candidates.length > 0 && 
-                        parsed.candidates[0].content && parsed.candidates[0].content.parts && 
+                    if (parsed.candidates && parsed.candidates.length > 0 &&
+                        parsed.candidates[0].content && parsed.candidates[0].content.parts &&
                         parsed.candidates[0].content.parts.length > 0) {
-                        
+
                         return parsed.candidates[0].content.parts[0].text.trim();
                     }
                 } catch (parseError) {
@@ -136,7 +215,7 @@ async function callBigQueryML(prompt: string): Promise<string> {
                     return result;
                 }
             }
-            
+
             // Fallback to raw result if it's not a string or parsing failed
             return String(result);
         } else {
@@ -168,20 +247,20 @@ export async function POST({ request }: { request: Request }) {
             try {
                 // Clean up the SQL query (remove markdown formatting if present)
                 let cleanSQL = aiResponse.trim();
-                
+
                 // Remove SQL code block markers if present
                 if (cleanSQL.startsWith('```sql')) {
                     cleanSQL = cleanSQL.replace(/```sql\n?/, '').replace(/```$/, '').trim();
                 } else if (cleanSQL.startsWith('```')) {
                     cleanSQL = cleanSQL.replace(/```\n?/, '').replace(/```$/, '').trim();
                 }
-                
+
                 console.log('Clean SQL:', cleanSQL);
-                
+
                 // Execute the SQL query
                 const queryResults = await executeSQL(cleanSQL);
                 console.log('Query results:', queryResults.length, 'rows');
-                
+
                 return json({
                     type: 'sql',
                     response: cleanSQL,
