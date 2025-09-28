@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
+	import { browser } from '$app/environment';
 	import { Chart, registerables } from 'chart.js';
 
 	export let data: Record<string, unknown>[] = [];
@@ -7,12 +8,15 @@
 
 	let canvas: HTMLCanvasElement;
 	let chart: Chart | null = null;
-
-	Chart.register(...registerables);
+	let mounted = false;
 
 	onMount(() => {
-		if (data && data.length > 0) {
-			createChart();
+		if (browser) {
+			Chart.register(...registerables);
+			mounted = true;
+			if (data && data.length > 0) {
+				createChart();
+			}
 		}
 
 		return () => {
@@ -22,11 +26,13 @@
 		};
 	});
 
-	$: if (data && data.length > 0 && canvas) {
+	$: if (data && data.length > 0 && canvas && mounted && browser) {
 		createChart();
 	}
 
 	function createChart() {
+		if (!browser || !mounted) return;
+		
 		if (chart) {
 			chart.destroy();
 		}
