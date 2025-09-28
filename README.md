@@ -1,7 +1,3 @@
-## Update svetlekit
+## Preview
 
-npm install -D @sveltejs/kit@latest
-
-npm install -D @sveltejs/adapter-node@latest
-
-npx sv migrate
+![chrome-capture-2025-09-28](https://github.com/user-attachments/assets/de2d7587-3e19-4742-a8ec-e44ff31d746a)
